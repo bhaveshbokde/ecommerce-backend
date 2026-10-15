@@ -1,0 +1,160 @@
+# =============================================================================
+#  CI — build, test and verify
+# =============================================================================
+#  Runs the full suite against real PostgreSQL and real Redis, as service
+#  containers. The local machine this was developed on has no usable Docker
+#  daemon, so the Testcontainers-backed tests never run there; CI is where that
+#  path is exercised.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes an in-flight run on the same ref.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ecommerce_test_db
+          POSTGRES_USER: ecommerce_app
+          # CI-only, ephemeral, and visible in the workflow file on purpose:
+          # pretending a throwaway container password is a secret teaches the
+          # wrong lesson about which values actually matter.
+          POSTGRES_PASSWORD: ci-ephemeral-password
+          POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ecommerce_app -d ecommerce_test_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      ECOMMERCE_DB_URL: jdbc:postgresql://127.0.0.1:5432/ecommerce_test_db
+      ECOMMERCE_TEST_DB_URL: jdbc:postgresql://127.0.0.1:5432/ecommerce_test_db
+      ECOMMERCE_DB_USERNAME: ecommerce_app
+      ECOMMERCE_DB_PASSWORD: ci-ephemeral-password
+      ECOMMERCE_REDIS_HOST: 127.0.0.1
+      ECOMMERCE_REDIS_PORT: 6379
+      # 32 bytes of key material. Worthless outside this job — it signs nothing
+      # that leaves the runner.
+      ECOMMERCE_JWT_SECRET: Y2ktb25seS1zaWduaW5nLWtleS1uZXZlci11c2VkLWVsc2V3aGVyZSE=
+      # No administrator is bootstrapped in CI; the tests create their own.
+      ECOMMERCE_ADMIN_EMAIL: ""
+      ECOMMERCE_ADMIN_PASSWORD: ""
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Verify the Maven wrapper is executable
+        run: chmod +x ./mvnw
+
+      - name: Compile
+        run: ./mvnw -B clean compile
+
+      - name: Unit tests
+        # Integration, concurrency and Redis tags are excluded here; they run in
+        # the verify step below.
+        run: ./mvnw -B test
+
+      - name: Apply migrations to the test database
+        run: ./mvnw -B flyway:migrate
+        env:
+          FLYWAY_URL: jdbc:postgresql://127.0.0.1:5432/ecommerce_test_db
+          FLYWAY_USER: ecommerce_app
+          FLYWAY_PASSWORD: ci-ephemeral-password
+
+      - name: Integration, security and concurrency tests
+        run: ./mvnw -B verify -Pintegration
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET, sys, pathlib
+          report = pathlib.Path('target/site/jacoco/jacoco.xml')
+          if not report.exists():
+              print('No coverage report produced'); sys.exit(0)
+          root = ET.parse(report).getroot()
+          for counter in root.findall('counter'):
+              missed, covered = int(counter.get('missed')), int(counter.get('covered'))
+              total = missed + covered
+              pct = 100.0 * covered / total if total else 0.0
+              print(f"{counter.get('type'):12} {covered:5}/{total:5}  {pct:5.1f}%")
+          PY
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            target/surefire-reports/
+            target/failsafe-reports/
+            target/site/jacoco/
+          retention-days: 7
+
+      - name: Package
+        run: ./mvnw -B package -DskipTests
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          # Gitleaks needs history to scan commits, not just the working tree.
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assert .env is not tracked
+        # Belt and braces alongside .gitignore: a `git add -f` would slip past it.
+        run: |
+          if git ls-files --error-unmatch .env 2>/dev/null; then
+            echo "::error::.env is tracked in Git. It contains the database password and the JWT signing key."
+            exit 1
+          fi
+          echo ".env is not tracked."
