@@ -240,7 +240,7 @@ tests that probe what an attacker would.
 | Integration, security, concurrency | 141 | PostgreSQL, Redis |
 | **Total** | **506** | |
 
-Coverage: **85.1% line**, 83.3% instruction, 100% of classes. Every core business
+Coverage: **84.9% line**, 82.9% instruction, 100% of classes. Every core business
 service is at or above 83.6%; most are above 92%.
 
 The concurrency tests are the ones that matter. A mock cannot demonstrate
@@ -258,8 +258,6 @@ Full breakdown, including the bugs the tests found, in
 |---|---|
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layering, schema, concurrency strategy, caching, trade-offs and what was left out |
 | [API-TESTING.md](docs/API-TESTING.md) | A copy-pasteable `curl` walkthrough, including the failure paths |
-| [PROJECT-WALKTHROUGH.md](docs/PROJECT-WALKTHROUGH.md) | How to present this project in an interview, with the questions it invites |
-| [INTERVIEW-QUESTIONS.md](docs/INTERVIEW-QUESTIONS.md) | 120 questions and answers grounded in this codebase |
 | [TEST-REPORT.md](docs/TEST-REPORT.md) | What was executed, what it found, and what is deliberately not covered |
 
 ---
